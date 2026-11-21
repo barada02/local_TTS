@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   cancelDownload,
+  deleteVoice,
   downloadEngine,
   listEngines,
   loadEngine,
@@ -15,10 +16,12 @@ import {
 } from "./lib/api";
 import { Player, concat, encodeWav } from "./lib/audio";
 import { SAMPLES } from "./lib/samples";
+import CloneDialog from "./CloneDialog";
 
 interface Run {
   id: number;
   engine: string;
+  engineName: string;
   voice: VoiceInfo;
   text: string;
   stats: SpeakStats;
@@ -26,17 +29,28 @@ interface Run {
   savedTo?: string;
 }
 
-const LOCALES: Record<string, string> = { "en-us": "US", "en-gb": "UK", characters: "Characters" };
+const LOCALES: Record<string, string> = {
+  custom: "My voices",
+  "en-us": "US",
+  "en-gb": "UK",
+  en: "English",
+  characters: "Characters",
+};
 const mb = (bytes: number) => `${(bytes / 1_048_576).toFixed(0)} MB`;
 const sec = (ms: number) => `${(ms / 1000).toFixed(2)} s`;
+const ackKey = (engine: string) => `tts-bench-ack-${engine}`;
+
+type Phase = "idle" | "downloading" | "verifying" | "installing" | "loading";
 
 export default function App() {
   const player = useMemo(() => new Player(), []);
   const [engines, setEngines] = useState<EngineInfo[]>([]);
   const [engineId, setEngineId] = useState("phonon");
-  const [loadInfo, setLoadInfo] = useState<LoadInfo | null>(null);
-  const [phase, setPhase] = useState<"idle" | "downloading" | "verifying" | "loading">("idle");
+  const [loadInfos, setLoadInfos] = useState<Record<string, LoadInfo>>({});
+  const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
+  const [installMsg, setInstallMsg] = useState("");
+  const [acked, setAcked] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
 
   const [text, setText] = useState(SAMPLES[0].text);
@@ -44,6 +58,8 @@ export default function App() {
   const [locale, setLocale] = useState("all");
   const [gender, setGender] = useState("all");
   const [query, setQuery] = useState("");
+  const [cloning, setCloning] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const [runs, setRuns] = useState<Run[]>([]);
   const [playingRun, setPlayingRun] = useState<number | null>(null);
@@ -55,6 +71,9 @@ export default function App() {
   const engine = engines.find((e) => e.id === engineId);
   const voices = engine?.voices ?? [];
   const voice = voices.find((v) => v.id === voiceId) ?? voices[0];
+  const loadInfo = loadInfos[engineId] ?? null;
+  const license = engine?.license;
+  const licenseOk = !license || license.commercialOk || acked[engineId];
 
   const refresh = useCallback(async () => {
     const list = await listEngines();
@@ -68,8 +87,7 @@ export default function App() {
       setError(null);
       try {
         const info = await loadEngine(id);
-        player.setRate(info.sampleRate);
-        setLoadInfo((prev) => (info.loadMs > 0 || !prev ? info : prev));
+        setLoadInfos((prev) => ({ ...prev, [id]: info.loadMs > 0 || !prev[id] ? info : prev[id] }));
         await refresh();
       } catch (e) {
         setError(String(e));
@@ -77,23 +95,40 @@ export default function App() {
         setPhase("idle");
       }
     },
-    [player, refresh],
+    [refresh],
   );
 
   useEffect(() => {
-    refresh()
-      .then((list) => {
-        const e = list.find((x) => x.id === engineId);
-        if (e?.downloaded) void load(e.id);
-      })
-      .catch((e) => setError(String(e)));
-    // Only on first render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    setAcked(Object.fromEntries(["phonon", "woof"].map((id) => [id, localStorage.getItem(ackKey(id)) === "1"])));
+    refresh().catch((e) => setError(String(e)));
+  }, [refresh]);
+
+  // Load an engine when it is selected, if its files are in place.
+  useEffect(() => {
+    if (engine?.downloaded && !loadInfos[engine.id] && phase === "idle") void load(engine.id);
+  }, [engine, loadInfos, phase, load]);
+
+  useEffect(() => {
+    if (loadInfo) player.setRate(loadInfo.sampleRate);
+  }, [loadInfo, player]);
 
   useEffect(() => {
     player.onIdle = () => setPlayingRun(null);
   }, [player]);
+
+  function switchEngine(id: string) {
+    void stop();
+    setEngineId(id);
+    setVoiceId(null);
+    setLocale("all");
+    setGender("all");
+    setQuery("");
+  }
+
+  function acknowledge(on: boolean) {
+    localStorage.setItem(ackKey(engineId), on ? "1" : "0");
+    setAcked((a) => ({ ...a, [engineId]: on }));
+  }
 
   async function download() {
     if (!engine) return;
@@ -105,7 +140,12 @@ export default function App() {
         if (e.kind === "progress") {
           setPhase("downloading");
           setProgress(e.downloaded / e.total);
-        } else setPhase("verifying");
+        } else if (e.kind === "verifying") {
+          setPhase("verifying");
+        } else {
+          setPhase("installing");
+          setInstallMsg(e.message);
+        }
       });
       await refresh();
       await load(engine.id);
@@ -124,7 +164,15 @@ export default function App() {
       if (live) player.push(c);
     });
     if (stats.stopped || chunks.length === 0) return null;
-    const run: Run = { id: ++runId.current, engine: engineId, voice: v, text, stats, audio: concat(chunks) };
+    const run: Run = {
+      id: ++runId.current,
+      engine: engineId,
+      engineName: engine?.name ?? engineId,
+      voice: v,
+      text,
+      stats,
+      audio: concat(chunks),
+    };
     setRuns((r) => [run, ...r]);
     return run;
   }
@@ -194,21 +242,38 @@ export default function App() {
     }
   }
 
+  async function removeVoice(v: VoiceInfo) {
+    if (confirmDelete !== v.id) {
+      setConfirmDelete(v.id);
+      return;
+    }
+    setConfirmDelete(null);
+    try {
+      await deleteVoice(engineId, v.id);
+      if (voiceId === v.id) setVoiceId(null);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   const filtered = voices.filter(
     (v) =>
       (locale === "all" || v.locale === locale) &&
       (gender === "all" || v.gender === gender) &&
       (!query || `${v.name} ${v.description}`.toLowerCase().includes(query.toLowerCase())),
   );
-  const locales = [...new Set(voices.map((v) => v.locale))];
+  const locales = [...new Set(voices.map((v) => v.locale))].sort((a, b) => (a === "custom" ? -1 : b === "custom" ? 1 : 0));
+  const genders = ["all", ...new Set(voices.map((v) => v.gender))];
   const ready = !!engine?.downloaded && phase === "idle" && !!loadInfo;
   const last = runs[0]?.stats;
+  const setupOnly = !!engine && engine.presentBytes >= engine.totalBytes;
 
   return (
     <div className="app">
       <header>
         <h1>tts-bench</h1>
-        <select value={engineId} onChange={(e) => setEngineId(e.target.value)}>
+        <select value={engineId} onChange={(e) => switchEngine(e.target.value)}>
           {engines.map((e) => (
             <option key={e.id} value={e.id}>
               {e.name}
@@ -218,11 +283,23 @@ export default function App() {
         <span className="muted engine-desc">{engine?.description}</span>
         <span className="spacer" />
         {loadInfo && (
-          <span className="chip" title="Time to load the model into memory, and this process's memory afterwards">
+          <span className="chip" title="Time to load the model, and the memory of the process it runs in">
             loaded in {sec(loadInfo.loadMs)} · {loadInfo.ramMb.toFixed(0)} MB RAM
           </span>
         )}
       </header>
+
+      {license && (
+        <div className={`license ${license.commercialOk ? "" : "restricted"}`}>
+          <strong>{license.name}</strong>
+          <span>{license.commercialOk ? " · commercial use OK" : " · not for commercial use"}</span>
+          <span className="muted"> — {license.summary}</span>
+          {license.credit && <div className="credit">{license.credit}</div>}
+          <button className="link" onClick={() => void openUrl(license.url)}>
+            Read the license
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="error" onClick={() => setError(null)}>
@@ -233,9 +310,23 @@ export default function App() {
       {engine && !engine.downloaded && (
         <section className="card setup">
           <div>
-            <strong>{engine.name}</strong> needs to be downloaded once ({mb(engine.totalBytes)}: the model and{" "}
-            {voices.length} voices).
+            {setupOnly ? (
+              <>
+                <strong>{engine.name}</strong> is downloaded. It still needs a one-time setup (a Python environment
+                with numpy).
+              </>
+            ) : (
+              <>
+                <strong>{engine.name}</strong> needs to be downloaded once ({mb(engine.totalBytes)}).
+              </>
+            )}
           </div>
+          {license && !license.commercialOk && (
+            <label className="check">
+              <input type="checkbox" checked={!!acked[engineId]} onChange={(e) => acknowledge(e.target.checked)} />
+              <span>I'll use this model only for non-commercial purposes, and credit it as the license requires.</span>
+            </label>
+          )}
           {phase === "downloading" || phase === "verifying" ? (
             <div className="row">
               <div className="bar">
@@ -244,10 +335,15 @@ export default function App() {
               <span className="muted">{phase === "verifying" ? "Verifying…" : `${(progress * 100).toFixed(0)}%`}</span>
               <button onClick={() => void cancelDownload()}>Cancel</button>
             </div>
+          ) : phase === "installing" ? (
+            <div className="muted">{installMsg || "Setting up…"} (this can take a minute)</div>
           ) : (
-            <button className="primary" onClick={() => void download()}>
-              {engine.presentBytes > 0 ? "Resume download" : "Download"}
-            </button>
+            <div className="row">
+              <button className="primary" disabled={!licenseOk} onClick={() => void download()}>
+                {setupOnly ? "Finish setup" : engine.presentBytes > 0 ? "Resume download" : "Download"}
+              </button>
+              {!licenseOk && <span className="muted">Tick the box to continue.</span>}
+            </div>
           )}
         </section>
       )}
@@ -307,26 +403,35 @@ export default function App() {
           <section className="card voices">
             <div className="row wrap">
               <strong>Voices</strong>
-              <div className="seg">
-                {["all", ...locales].map((l) => (
-                  <button key={l} className={locale === l ? "on" : ""} onClick={() => setLocale(l)}>
-                    {l === "all" ? "All" : (LOCALES[l] ?? l)}
-                  </button>
-                ))}
-              </div>
-              <div className="seg">
-                {["all", "female", "male", "character"].map((g) => (
-                  <button key={g} className={gender === g ? "on" : ""} onClick={() => setGender(g)}>
-                    {g === "all" ? "Any" : g[0].toUpperCase() + g.slice(1)}
-                  </button>
-                ))}
-              </div>
+              {locales.length > 1 && (
+                <div className="seg">
+                  {["all", ...locales].map((l) => (
+                    <button key={l} className={locale === l ? "on" : ""} onClick={() => setLocale(l)}>
+                      {l === "all" ? "All" : (LOCALES[l] ?? l)}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {genders.length > 2 && (
+                <div className="seg">
+                  {genders.map((g) => (
+                    <button key={g} className={gender === g ? "on" : ""} onClick={() => setGender(g)}>
+                      {g === "all" ? "Any" : g[0].toUpperCase() + g.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              )}
               <input
                 className="search"
                 placeholder="Search voices…"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
+              {engine?.clone && (
+                <button disabled={!ready || !!busy} onClick={() => setCloning(true)}>
+                  + Clone a voice
+                </button>
+              )}
             </div>
             <div className="grid">
               {filtered.map((v) => (
@@ -336,9 +441,25 @@ export default function App() {
                   onClick={() => setVoiceId(v.id)}
                   title={v.description}
                 >
-                  <div className="name">{v.name}</div>
+                  <div className="name">
+                    {v.name}
+                    {v.custom && (
+                      <span
+                        role="button"
+                        className="del"
+                        title="Delete this voice"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void removeVoice(v);
+                        }}
+                      >
+                        {confirmDelete === v.id ? "Delete?" : "✕"}
+                      </span>
+                    )}
+                  </div>
                   <div className="meta">
-                    {LOCALES[v.locale] ?? v.locale} · {v.gender}
+                    {LOCALES[v.locale] ?? v.locale}
+                    {v.gender !== "unknown" && v.gender !== "custom" ? ` · ${v.gender}` : ""}
                     {v.age ? ` · ${v.age}` : ""}
                   </div>
                   <div className="desc">{v.description}</div>
@@ -354,10 +475,15 @@ export default function App() {
             <strong>Last run</strong>
             {last ? (
               <div className="metrics">
-                <Metric label="Real-time factor" value={last.rtf.toFixed(2)} hint={last.rtf < 1 ? "faster than real time" : "slower than real time"} good={last.rtf < 1} />
+                <Metric
+                  label="Real-time factor"
+                  value={last.rtf.toFixed(2)}
+                  hint={last.rtf < 1 ? "faster than real time" : "slower than real time"}
+                  good={last.rtf < 1}
+                />
                 <Metric label="First audio" value={sec(last.ttfaMs)} hint="time to first sound" />
                 <Metric label="Generated" value={sec(last.totalMs)} hint={`${last.audioSec.toFixed(1)} s of audio`} />
-                <Metric label="RAM" value={`${last.ramMb.toFixed(0)} MB`} hint="this process" />
+                <Metric label="RAM" value={`${last.ramMb.toFixed(0)} MB`} hint="process the model runs in" />
               </div>
             ) : (
               <div className="muted">Generate something to see speed numbers.</div>
@@ -379,7 +505,7 @@ export default function App() {
                   </button>
                   <div className="info">
                     <div>
-                      <strong>{r.voice.name}</strong>{" "}
+                      <strong>{r.voice.name}</strong> <span className="muted">· {r.engineName}</span>{" "}
                       <span className="muted">
                         RTF {r.stats.rtf.toFixed(2)} · first {sec(r.stats.ttfaMs)} · {r.stats.audioSec.toFixed(1)} s audio
                       </span>
@@ -396,6 +522,22 @@ export default function App() {
           </section>
         </div>
       </main>
+
+      {cloning && engine?.clone && (
+        <CloneDialog
+          engine={engine.id}
+          engineName={engine.name}
+          spec={engine.clone}
+          onClose={() => setCloning(false)}
+          onCreated={async (v) => {
+            setCloning(false);
+            await refresh();
+            setLocale("custom");
+            setGender("all");
+            setVoiceId(v.id);
+          }}
+        />
+      )}
     </div>
   );
 }

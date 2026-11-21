@@ -11,7 +11,7 @@ use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody, Request};
 use tauri::{AppHandle, Manager, State};
 
 use download::{Download, DownloadEvent, DownloadState};
-use engines::{Engine, VoiceInfo};
+use engines::{CloneSpec, Engine, LicenseInfo, VoiceInfo};
 
 struct AppState {
     engines: Vec<Arc<dyn Engine>>,
@@ -39,11 +39,16 @@ fn engine_root(app: &AppHandle, engine: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("Could not resolve the app data folder: {e}"))
 }
 
-/// Memory used by this process (the model lives here), in MB.
-fn process_mb() -> f64 {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let Ok(pid) = sysinfo::get_current_pid() else {
-        return 0.0;
+/// Memory used by the process the model lives in, in MB: the engine's worker
+/// process if it has one, otherwise this app.
+fn process_mb(sidecar: Option<u32>) -> f64 {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let pid = match sidecar {
+        Some(p) => Pid::from_u32(p),
+        None => match sysinfo::get_current_pid() {
+            Ok(p) => p,
+            Err(_) => return 0.0,
+        },
     };
     let Ok(mut sys) = System::new() else {
         return 0.0;
@@ -65,6 +70,9 @@ struct EngineInfo {
     name: String,
     description: String,
     voices: Vec<VoiceInfo>,
+    license: LicenseInfo,
+    /// Present when the engine can clone voices.
+    clone: Option<CloneSpec>,
     downloaded: bool,
     present_bytes: u64,
     total_bytes: u64,
@@ -72,13 +80,16 @@ struct EngineInfo {
 }
 
 fn describe(app: &AppHandle, e: &dyn Engine) -> Result<EngineInfo, String> {
-    let files: Vec<Download> = e.downloads(&engine_root(app, e.id())?);
+    let root = engine_root(app, e.id())?;
+    let files: Vec<Download> = e.downloads(&root);
     Ok(EngineInfo {
         id: e.id().into(),
         name: e.name().into(),
         description: e.description().into(),
-        voices: e.voices(),
-        downloaded: files.iter().all(|f| f.dest.is_file()),
+        voices: e.voices(&root),
+        license: e.license(),
+        clone: e.clone_spec(&root),
+        downloaded: files.iter().all(|f| f.dest.is_file()) && !e.needs_setup(&root),
         present_bytes: download::bytes_present(&files),
         total_bytes: files.iter().map(|f| f.size).sum(),
         loaded: e.is_loaded(),
@@ -103,8 +114,20 @@ async fn engine_download(
     on_event: Channel<DownloadEvent>,
 ) -> Result<(), String> {
     let e = state.engine(&engine)?;
-    let files = e.downloads(&engine_root(&app, &engine)?);
-    download::run(&dl, &files, &on_event).await
+    let root = engine_root(&app, &engine)?;
+    let files = e.downloads(&root);
+    download::run(&dl, &files, &on_event).await?;
+    if e.needs_setup(&root) {
+        let events = on_event.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            e.setup(&root, &mut |message| {
+                let _ = events.send(DownloadEvent::Installing { message: message.to_string() });
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -136,7 +159,7 @@ async fn engine_load(
         Ok(LoadInfo {
             sample_rate,
             load_ms,
-            ram_mb: process_mb(),
+            ram_mb: process_mb(e.sidecar_pid()),
         })
     })
     .await
@@ -179,6 +202,8 @@ async fn engine_speak(
 
     tauri::async_runtime::spawn_blocking(move || {
         let _turn = busy.lock().map_err(|_| "State is poisoned")?;
+        // Switching voice can take time on some engines; keep it out of the timings.
+        e.prepare_voice(&root, &voice)?;
         let started = Instant::now();
         let mut first: Option<f64> = None;
         let mut samples = 0usize;
@@ -210,12 +235,84 @@ async fn engine_speak(
             } else {
                 0.0
             },
-            ram_mb: process_mb(),
+            ram_mb: process_mb(e.sidecar_pid()),
             stopped,
         })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Decodes %XX escapes (the frontend percent-encodes header values).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit()
+        {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn header(request: &Request<'_>, name: &str) -> Result<String, String> {
+    request
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .ok_or_else(|| format!("Missing {name} header"))
+}
+
+/// Makes a new voice from a recording. The body is the audio as raw mono f32
+/// samples at the rate the engine asked for; `x-engine` and `x-name` carry the
+/// engine id and the voice's name (percent-encoded).
+#[tauri::command]
+async fn engine_create_voice(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: Request<'_>,
+) -> Result<VoiceInfo, String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected raw audio bytes".into());
+    };
+    let pcm: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    let engine = header(&request, "x-engine")?;
+    let name = header(&request, "x-name")?;
+    let e = state.engine(&engine)?;
+    let root = engine_root(&app, &engine)?;
+    let busy = state.busy.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _turn = busy.lock().map_err(|_| "State is poisoned")?;
+        e.create_voice(&root, &name, &pcm)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn engine_delete_voice(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    engine: String,
+    voice: String,
+) -> Result<(), String> {
+    let e = state.engine(&engine)?;
+    e.delete_voice(&engine_root(&app, &engine)?, &voice)
 }
 
 #[tauri::command]
@@ -272,9 +369,19 @@ pub fn run() {
             engine_load,
             engine_speak,
             engine_stop,
+            engine_create_voice,
+            engine_delete_voice,
             download::cancel_download,
             save_wav
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Make sure engine worker processes never outlive the app.
+            if let tauri::RunEvent::Exit = event {
+                for e in &app.state::<AppState>().engines {
+                    e.shutdown();
+                }
+            }
+        });
 }

@@ -9,6 +9,23 @@ export interface VoiceInfo {
   gender: string;
   age: string;
   description: string;
+  /** A voice you made yourself (cloned). */
+  custom: boolean;
+}
+
+export interface LicenseInfo {
+  name: string;
+  url: string;
+  summary: string;
+  /** False means commercial use is not allowed. */
+  commercialOk: boolean;
+  credit: string | null;
+}
+
+export interface CloneSpec {
+  sampleRate: number;
+  minSeconds: number;
+  maxSeconds: number;
 }
 
 export interface EngineInfo {
@@ -16,6 +33,9 @@ export interface EngineInfo {
   name: string;
   description: string;
   voices: VoiceInfo[];
+  license: LicenseInfo;
+  /** Present when the engine can clone voices. */
+  clone: CloneSpec | null;
   downloaded: boolean;
   presentBytes: number;
   totalBytes: number;
@@ -41,7 +61,8 @@ export interface SpeakStats {
 
 export type DownloadEvent =
   | { kind: "progress"; downloaded: number; total: number }
-  | { kind: "verifying" };
+  | { kind: "verifying" }
+  | { kind: "installing"; message: string };
 
 export const listEngines = () => invoke<EngineInfo[]>("engines_list");
 
@@ -77,3 +98,14 @@ export function speak(
 export function saveWav(wav: Uint8Array, name: string): Promise<string> {
   return invoke<string>("save_wav", wav, { headers: { "x-name": name } });
 }
+
+/** Makes a voice from a recording (mono samples at the engine's clone rate). */
+export function createVoice(engine: string, name: string, pcm: Float32Array): Promise<VoiceInfo> {
+  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  return invoke<VoiceInfo>("engine_create_voice", bytes, {
+    headers: { "x-engine": encodeURIComponent(engine), "x-name": encodeURIComponent(name) },
+  });
+}
+
+export const deleteVoice = (engine: string, voice: string) =>
+  invoke("engine_delete_voice", { engine, voice });

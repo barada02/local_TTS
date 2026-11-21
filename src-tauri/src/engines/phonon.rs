@@ -5,16 +5,21 @@
 //! `ptts` 0.5.0 pins. The voice list in `data/phonon_voices.json` is generated
 //! from the catalog's `voices.jsonl` (English only, since this is the `-en`
 //! model) with each file's SHA-256 taken from the repository tree.
+//!
+//! No voice cloning: the released 31M weights contain no speaker encoder (no
+//! `mimi_speaker.*` tensors), so `ptts` can only use the catalog's ready-made
+//! voices. Gradium offers cloning only through its hosted Studio.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ptts::checkpoint::{Checkpoint, ResolveOptions};
 use ptts::preprocess::Lang;
 use ptts::synth::{DeviceKind, Quant, SpeechOptions, Synth};
 use serde::Deserialize;
+use std::sync::Mutex;
 
-use super::{Engine, SpeakOutcome, VoiceInfo};
+use super::{Engine, LicenseInfo, SpeakOutcome, VoiceInfo};
 use crate::download::Download;
 
 const MODEL_URL: &str =
@@ -110,7 +115,17 @@ impl Engine for Phonon {
     }
 
     fn description(&self) -> &'static str {
-        "Gradium · 31M parameters · English · Apache-2.0 · pure Rust on CPU"
+        "Gradium · 31M parameters · English · pure Rust on CPU · 37 voices, no cloning"
+    }
+
+    fn license(&self) -> LicenseInfo {
+        LicenseInfo {
+            name: "Apache-2.0",
+            url: "https://huggingface.co/gradium/phonon-31m-en",
+            summary: "Free for commercial use. Don't impersonate people, and tell listeners when speech is synthetic.",
+            commercial_ok: true,
+            credit: None,
+        }
     }
 
     fn downloads(&self, root: &Path) -> Vec<Download> {
@@ -135,7 +150,7 @@ impl Engine for Phonon {
         files
     }
 
-    fn voices(&self) -> Vec<VoiceInfo> {
+    fn voices(&self, _root: &Path) -> Vec<VoiceInfo> {
         catalog()
             .into_iter()
             .map(|v| VoiceInfo {
@@ -145,6 +160,7 @@ impl Engine for Phonon {
                 gender: v.gender,
                 age: v.age,
                 description: v.description,
+                custom: false,
             })
             .collect()
     }

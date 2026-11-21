@@ -37,6 +37,8 @@ pub struct Download {
 pub enum DownloadEvent {
     Progress { downloaded: u64, total: u64 },
     Verifying,
+    /// A step after the download, such as installing a Python environment.
+    Installing { message: String },
 }
 
 /// Only one download runs at a time, and it can be cancelled.
