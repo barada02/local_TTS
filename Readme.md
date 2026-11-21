@@ -28,17 +28,15 @@ Notes from trying them on an i5-8265U laptop (4 cores, no GPU):
 
 Switching engines in the UI keeps the earlier ones loaded, so history from different models can be compared side by side.
 
-## What the UI shows
+## The three tabs
 
-- **Real-time factor (RTF):** generation time ÷ audio length. Below 1 means faster than real time.
-- **First audio:** time until the first sound, which matters for interactive use.
-- **Generated:** total generation time and audio length.
-- **RAM:** memory of the process the model runs in (the app for Phonon, the worker for Woof), plus model load time in the header.
-- Test sentences (numbers, acronyms, questions, long text) so every model gets the same input.
-- **Run all voices:** generates the same text with every voice shown, silently, so you can listen to them one by one from the history.
-- **Save:** writes a WAV file to the app's `outputs` folder and opens it.
+- **Studio:** pick a model, type or choose a test sentence, pick a voice and speak. The last run shows real-time factor (generation time ÷ audio length; below 1 is faster than real time), time to first audio, total time and the memory of the process the model runs in. **Run all voices** makes the same text with every voice shown, silently, to listen to from the history. **Save** writes a WAV file to the app's `outputs` folder.
+- **Saved voices:** star any voice (the star on a voice card or in the history) to keep it here, across all models. Each saved voice can be previewed with the current text, opened in the Studio, or removed. Saved voices are kept between sessions.
+- **Compare:** speaks one text with every saved voice you tick, one at a time, then charts real-time factor (with a marker at real time), time to first audio, generation time and memory, plus a results table and "fastest / quickest to start / lightest" cards. Options: runs per voice (averaged) and an unseen warm-up run per model, since the first run is often slower. It loads each model it needs.
 
-Model files download once, with progress, resume and SHA-256 checks, into the app data folder (`%APPDATA%\com.barada02.tts-bench\engines\`). Woof is pinned to one commit of its Hugging Face repo.
+Switching tabs keeps results and filters. Model files download once, with progress, resume and SHA-256 checks, into the app data folder (`%APPDATA%\com.barada02.tts-bench\engines\`). Woof is pinned to one commit of its Hugging Face repo.
+
+The logo is `app-icon.svg`; regenerate every icon from it with `npx tauri icon app-icon.svg` (then delete the `android` and `ios` folders it creates in `src-tauri/icons`).
 
 ## Voice cloning
 
