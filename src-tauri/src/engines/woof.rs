@@ -261,14 +261,14 @@ impl Engine for Woof {
             id: id.into(),
             name: name.into(),
             locale: "en".into(),
-            gender: "unknown".into(),
+            gender: "female".into(),
             age: String::new(),
             description: description.into(),
             custom: false,
         };
         vec![
-            voice("juno", "Juno", "Default voice. Faster and lighter on memory."),
-            voice("mira", "Mira", "Lower word error rate in Underdog's tests, but slower and heavier."),
+            voice("juno", "Juno", "Female voice (pitch ~200 Hz, measured). Default; faster and lighter on memory."),
+            voice("mira", "Mira", "Female voice (pitch ~250 Hz, measured). Lower word error rate in Underdog's tests, but slower and heavier."),
         ]
     }
 
