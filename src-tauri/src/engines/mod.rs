@@ -4,9 +4,12 @@
 //! The app only talks to this trait, so adding a model means adding one file
 //! here and registering it in [`registry`]. Engines that need a different
 //! runtime (Python, ONNX, an external binary) wrap it behind the same trait:
-//! Woof, for example, runs in a small Python process (see `woof.rs`).
+//! Woof, Kitten and Kokoro, for example, run in a small Python process (see
+//! `pyworker.rs`, `woof.rs` and `onnx.rs`).
 
+pub mod onnx;
 pub mod phonon;
+pub mod pyworker;
 pub mod woof;
 
 use std::path::Path;
@@ -109,5 +112,12 @@ pub trait Engine: Send + Sync {
 }
 
 pub fn registry() -> Vec<Box<dyn Engine>> {
-    vec![Box::new(phonon::Phonon::default()), Box::new(woof::Woof::default())]
+    vec![
+        Box::new(phonon::Phonon::default()),
+        Box::new(onnx::OnnxEngine::kokoro()),
+        Box::new(onnx::OnnxEngine::kitten("nano")),
+        Box::new(onnx::OnnxEngine::kitten("micro")),
+        Box::new(onnx::OnnxEngine::kitten("mini")),
+        Box::new(woof::Woof::default()),
+    ]
 }

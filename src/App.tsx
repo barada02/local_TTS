@@ -99,7 +99,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    setAcked(Object.fromEntries(["phonon", "woof"].map((id) => [id, localStorage.getItem(ackKey(id)) === "1"])));
+    setAcked(Object.fromEntries(["phonon", "kokoro", "kitten-nano", "kitten-micro", "kitten-mini", "woof"].map((id) => [id, localStorage.getItem(ackKey(id)) === "1"])));
     refresh().catch((e) => setError(String(e)));
   }, [refresh]);
 
