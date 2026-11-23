@@ -39,6 +39,8 @@ export interface EngineInfo {
   downloaded: boolean;
   presentBytes: number;
   totalBytes: number;
+  /** Space deleting this engine's files would free (its folder, plus a shared Python environment nothing else needs). */
+  diskBytes: number;
   loaded: boolean;
 }
 
@@ -73,6 +75,9 @@ export function downloadEngine(engine: string, onEvent: (e: DownloadEvent) => vo
 }
 
 export const cancelDownload = () => invoke("cancel_download");
+
+/** Deletes an engine's downloaded files (it can be downloaded again). Resolves with the bytes freed. */
+export const deleteEngineFiles = (engine: string) => invoke<number>("engine_delete_files", { engine });
 export const loadEngine = (engine: string) => invoke<LoadInfo>("engine_load", { engine });
 export const stopSpeaking = () => invoke("engine_stop");
 

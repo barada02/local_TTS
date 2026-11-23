@@ -11,6 +11,39 @@ npm run tauri dev
 
 Needs Node, Rust (MSVC toolchain on Windows) and WebView2. The first launch compiles the Rust side, which takes several minutes. The Python-based engines need [`uv`](https://docs.astral.sh/uv/) (recommended) or a suitable Python; the app creates its own environments and installs the packages.
 
+## Build the app
+
+```
+npm install
+npm run tauri build
+```
+
+This makes a release build (several minutes the first time). The results are in `src-tauri/target/release/`:
+
+| File | What it is |
+|---|---|
+| `tts-bench.exe` | The app itself; runs without installing |
+| `bundle/nsis/tts-bench_<version>_x64-setup.exe` | Installer (installs to `C:\Program Files\tts-bench\`) |
+| `bundle/msi/tts-bench_<version>_x64_en-US.msi` | The same as an MSI |
+
+None of these contain the models; they are downloaded by the app (see below). `src-tauri/target/`, `node_modules/` and `dist/` are build output and not in git, so a fresh clone plus the commands above rebuilds everything.
+
+## Where the app keeps its files
+
+Everything the app downloads or writes is in `%APPDATA%\com.barada02.tts-bench\` (for example `C:\Users\<you>\AppData\Roaming\com.barada02.tts-bench\`). The dev build, the release exe and the installed app all share this folder.
+
+| Folder | Contents |
+|---|---|
+| `engines\<engine>\` | One per engine: model files, voices, logs, and for Woof its Python environment |
+| `engines\_onnx-env\` | The Python environment Kokoro and the Kitten models share |
+| `outputs\` | WAV files saved from the Studio |
+
+Saved voices (stars) and license acknowledgements are kept in the app's WebView storage, in `%LOCALAPPDATA%\com.barada02.tts-bench\`.
+
+**Freeing disk space.** The Studio shows how much space the selected model takes, with a **Delete model files** button. It unloads the model and deletes its folder, including any voices cloned with it. For Kokoro and the Kitten models, the shared `_onnx-env` is deleted along with the last one of them that has files. A deleted model can be downloaded again at any time. You can also delete the folders above by hand while the app is closed.
+
+**Uninstalling.** Uninstalling keeps these folders unless you tick **Delete the application data** in the uninstaller of the setup `.exe` version. The MSI version always keeps them. To remove everything by hand, delete `%APPDATA%\com.barada02.tts-bench\` (models, outputs) and `%LOCALAPPDATA%\com.barada02.tts-bench\` (saved voices, settings).
+
 ## Models
 
 | Engine | Runtime | Voices | Cloning | License |

@@ -12,7 +12,7 @@ pub mod phonon;
 pub mod pyworker;
 pub mod woof;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -97,6 +97,16 @@ pub trait Engine: Send + Sync {
     }
     /// Stops any separate process. Called when the app exits.
     fn shutdown(&self) {}
+    /// Lets go of the model and any worker process, so its files can be deleted.
+    fn unload(&self) {
+        self.shutdown();
+    }
+    /// Folders outside `root` that this engine needs and other engines may
+    /// share (for example a Python environment). Deleted along with the
+    /// engine's files once no other downloaded engine uses them.
+    fn shared_dirs(&self, _root: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
 
     /// Voice cloning: what the reference recording must look like, if supported.
     fn clone_spec(&self, _root: &Path) -> Option<CloneSpec> {

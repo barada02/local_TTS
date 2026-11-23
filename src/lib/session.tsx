@@ -12,6 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  deleteEngineFiles,
   downloadEngine,
   listEngines,
   loadEngine,
@@ -65,6 +66,8 @@ interface Session {
   install: (id: string) => Promise<void>;
   /** Loads an engine if needed. Resolves with null if it isn't installed. */
   ensureLoaded: (id: string) => Promise<LoadInfo | null>;
+  /** Unloads an engine and deletes its downloaded files. Resolves with the bytes freed. */
+  uninstall: (id: string) => Promise<number>;
 
   /** The engine and voice picked in the Studio. */
   engineId: string;
@@ -198,6 +201,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [ensureLoaded, refresh, setPhase],
   );
 
+  const uninstall = useCallback(
+    async (id: string) => {
+      await stopSpeaking();
+      try {
+        return await deleteEngineFiles(id);
+      } finally {
+        // Forget every engine the backend no longer has loaded (deleting a
+        // shared Python environment can unload more than one).
+        const list = await refresh();
+        for (const e of list) {
+          if (!e.loaded) delete loaded.current[e.id];
+        }
+        setLoadInfos({ ...loaded.current });
+      }
+    },
+    [refresh],
+  );
+
   const isFavorite = useCallback(
     (engine: string, voice: string) => favorites.some((f) => f.engine === engine && f.voice.id === voice),
     [favorites],
@@ -247,6 +268,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     phases,
     install,
     ensureLoaded,
+    uninstall,
     engineId,
     voiceId,
     openInStudio,

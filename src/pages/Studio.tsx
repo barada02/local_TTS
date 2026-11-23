@@ -6,6 +6,7 @@ import { seconds, synthesize, type Clip } from "../lib/clips";
 import { useSession } from "../lib/session";
 import CloneDialog from "../CloneDialog";
 import { PlayIcon, SaveIcon, StarIcon, StopIcon } from "../components/Icons";
+import ModelFiles from "../components/ModelFiles";
 import SetupBanner, { LicenseStrip } from "../components/SetupBanner";
 import TextBox from "../components/TextBox";
 import VoiceCard, { LOCALES } from "../components/VoiceCard";
@@ -157,6 +158,7 @@ export default function Studio() {
         </div>
 
         {engine && <LicenseStrip engine={engine} />}
+        {engine && <ModelFiles engine={engine} />}
         {engine && !engine.downloaded && <SetupBanner engine={engine} />}
         {phase.kind === "loading" && <div className="panel muted">Loading {engine?.name}…</div>}
         {engine?.downloaded && !loadInfo && phase.kind === "idle" && (

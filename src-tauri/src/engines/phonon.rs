@@ -173,6 +173,12 @@ impl Engine for Phonon {
         self.synth.lock().map(|g| g.is_some()).unwrap_or(false)
     }
 
+    fn unload(&self) {
+        if let Ok(mut guard) = self.synth.lock() {
+            *guard = None;
+        }
+    }
+
     fn speak(
         &self,
         root: &Path,
@@ -190,5 +196,50 @@ impl Engine for Phonon {
             }
         }
         Ok(SpeakOutcome { sample_rate: synth.sample_rate() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// Opt-in: needs the downloaded Phonon files (works on a copy).
+    /// `TTS_PHONON_SRC=<the engines/phonon folder> cargo test phonon -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn unload_lets_the_files_be_deleted() {
+        let src = PathBuf::from(std::env::var("TTS_PHONON_SRC").expect("TTS_PHONON_SRC"));
+        let root = std::env::temp_dir().join(format!("tts-bench-phonon-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        copy_dir(&src, &root);
+
+        let engine = Phonon::default();
+        engine.load(&root).unwrap();
+        let mut samples = 0;
+        engine
+            .speak(&root, "Hello.", &catalog()[0].id, &mut |c| {
+                samples += c.len();
+                true
+            })
+            .unwrap();
+        assert!(samples > 0);
+
+        engine.unload();
+        assert!(!engine.is_loaded());
+        crate::storage::remove_dir(&root).unwrap();
+        assert!(!root.exists());
     }
 }

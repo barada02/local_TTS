@@ -1,5 +1,6 @@
 mod download;
 mod engines;
+mod storage;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +40,11 @@ fn engine_root(app: &AppHandle, engine: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("Could not resolve the app data folder: {e}"))
 }
 
+/// The folders deleting `engine`'s files would remove (see `storage.rs`).
+fn deletable_dirs(app: &AppHandle, state: &AppState, engine: &dyn Engine) -> Result<Vec<PathBuf>, String> {
+    storage::deletable_dirs(&state.engines, engine, &|id| engine_root(app, id))
+}
+
 /// Memory used by the process the model lives in, in MB: the engine's worker
 /// process if it has one, otherwise this app.
 fn process_mb(sidecar: Option<u32>) -> f64 {
@@ -76,10 +82,13 @@ struct EngineInfo {
     downloaded: bool,
     present_bytes: u64,
     total_bytes: u64,
+    /// Space that deleting this engine's files would free: its folder, plus
+    /// any shared folder (such as a Python environment) nothing else needs.
+    disk_bytes: u64,
     loaded: bool,
 }
 
-fn describe(app: &AppHandle, e: &dyn Engine) -> Result<EngineInfo, String> {
+fn describe(app: &AppHandle, state: &AppState, e: &dyn Engine) -> Result<EngineInfo, String> {
     let root = engine_root(app, e.id())?;
     let files: Vec<Download> = e.downloads(&root);
     Ok(EngineInfo {
@@ -92,17 +101,57 @@ fn describe(app: &AppHandle, e: &dyn Engine) -> Result<EngineInfo, String> {
         downloaded: files.iter().all(|f| f.dest.is_file()) && !e.needs_setup(&root),
         present_bytes: download::bytes_present(&files),
         total_bytes: files.iter().map(|f| f.size).sum(),
+        disk_bytes: deletable_dirs(app, state, e)?.iter().map(|d| storage::dir_size(d)).sum(),
         loaded: e.is_loaded(),
     })
 }
 
+// Async so that measuring folder sizes doesn't hold up the window.
 #[tauri::command]
-fn engines_list(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<EngineInfo>, String> {
+async fn engines_list(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<EngineInfo>, String> {
     state
         .engines
         .iter()
-        .map(|e| describe(&app, e.as_ref()))
+        .map(|e| describe(&app, &state, e.as_ref()))
         .collect()
+}
+
+/// Deletes an engine's downloaded files (model, voices made with it, Python
+/// environment) to free disk space. The engine is unloaded first; it can be
+/// downloaded again later. Returns the number of bytes freed.
+#[tauri::command]
+async fn engine_delete_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    engine: String,
+) -> Result<u64, String> {
+    let e = state.engine(&engine)?;
+    let dirs = deletable_dirs(&app, &state, e.as_ref())?;
+    // Every engine using one of these folders must let go of it first.
+    let mut users: Vec<Arc<dyn Engine>> = Vec::new();
+    for other in &state.engines {
+        let root = engine_root(&app, other.id())?;
+        let touched = other.id() == e.id() || other.shared_dirs(&root).iter().any(|d| dirs.contains(d));
+        if touched {
+            users.push(other.clone());
+        }
+    }
+    let busy = state.busy.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Wait for any run in progress, and keep new ones out while deleting.
+        let _turn = busy.lock().map_err(|_| "State is poisoned")?;
+        for u in &users {
+            u.unload();
+        }
+        let mut freed = 0;
+        for dir in &dirs {
+            freed += storage::dir_size(dir);
+            storage::remove_dir(dir)?;
+        }
+        Ok(freed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -371,6 +420,7 @@ pub fn run() {
             engine_stop,
             engine_create_voice,
             engine_delete_voice,
+            engine_delete_files,
             download::cancel_download,
             save_wav
         ])

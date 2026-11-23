@@ -295,6 +295,10 @@ impl Engine for OnnxEngine {
     fn shutdown(&self) {
         self.slot.shutdown();
     }
+
+    fn shared_dirs(&self, root: &Path) -> Vec<PathBuf> {
+        vec![venv_dir(root)]
+    }
 }
 
 #[cfg(test)]
